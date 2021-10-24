@@ -1,0 +1,202 @@
+version: '3.8'
+
+services:
+  canvas-db:
+    image: postgres:12.4
+    environment:
+      POSTGRES_DB:       canvas
+      POSTGRES_USER:     canvas
+      POSTGRES_PASSWORD: $DBA_PASSWORD
+      POSTGRES_DB_PASSWORD_FILE: /run/secrets/DB_DBA_PASSWORD
+    volumes:
+      - postgresdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    secrets:
+      - DB_DBA_PASSWORD
+    networks:
+      - $NETWORK
+
+  redis:
+    image: redis:6.0-alpine
+    command: redis-server --appendonly yes
+    volumes:
+      - redisdata:/data
+    networks:
+      - $NETWORK
+
+  # mail:
+  #   image: mailhog/mailhog:v1.0.1
+  #   ports:
+  #     - "8902:8025"
+
+  app:
+    image: instructure/canvas-lms:stable
+    command: bash -c "./wait-for-it.sh -t 40 canvas-db:5432 && /usr/src/entrypoint"
+    #    command: bash -c "tail -f COPYRIGHT"
+    hostname: $HOST
+    secrets:
+      - SECRET
+      - API_KEY
+      - DB_DBA_PASSWORD
+    environment:
+      - CANVAS_LMS_ADMIN_EMAIL=test@example.nl
+      - CANVAS_LMS_STATS_COLLECTION=opt_out
+      - CANVAS_LMS_ACCOUNT_NAME=canvasTest
+      - CANVAS_DOMAIN=$HOST
+      - CANVAS_SECRET_FILE=/run/secrets/SECRET
+      - CANVAS_API_KEY_FILE=/run/secrets/API_KEY
+      - CANVAS_LMS_ADMIN_PASSWORD=$CANVAS_PASSWORD
+      - DB_DRIVER=postgresql
+      - DB_HOST=canvas-db
+      - DB_PORT=5432
+      - DB_USERNAME=canvas
+      - DB_PASSWORD=$DBA_PASSWORD
+      - DB_PASSWORD_FILE=/run/secrets/DB_DBA_PASSWORD
+      - DB_NAME=canvas
+      # for easy deployment on mail hog
+      # - MAIL_SERVER=mail
+      # - MAIL_PORT=1025
+      # - MAIL_USERNAME=canvas
+      # - MAIL_PASSWORD=canvas
+      # - MAIL_DOMAIN=example.com
+      # - MAIL_DEFAULT_SENDER_ADDRESS=canvas@example.com
+      # - MAIL_DEFAULT_SENDER_NAME=Canvas Admin      
+      - MAIL_SERVER=$MAIL_SERVER
+      - MAIL_PORT=$MAIL_PORT
+      - MAIL_DOMAIN=$MAIL_DOMAIN
+      - MAIL_DEFAULT_SENDER_ADDRESS=$MAIL_DEFAULT_SENDER_ADDRESS
+      - MAIL_DEFAULT_SENDER_NAME=$MAIL_DEFAULT_SENDER_NAME
+      - RAILS_ENV=production
+      - REDIS_SERVER=redis://redis:6379
+      - PASSENGER_STARTUP_TIMEOUT=300
+      #- DOMAIN=$COMPOSE_DOMAIN
+      #- APP_DOMAIN=$COMPOSE_DOMAIN
+      # to work with jwilder nginx proxy ssl for multiple ssl support on docker host 
+      - VIRTUAL_HOST=$HOST
+      - VIRTUAL_PROTO=https
+      - VIRTUAL_PORT=443
+      - CERT_NAME=$HOST ## Add this
+    volumes:
+      # config
+      - ./deploy/conf/cache_store.yml:/usr/src/app/config/cache_store.yml:ro
+      - ./deploy/conf/cassandra.yml:/usr/src/app/config/cassandra.yml:ro
+      - ./deploy/conf/consul.yml:/usr/src/app/config/consul.yml:ro
+      - ./deploy/conf/database.yml:/usr/src/app/config/database.yml:ro
+      - ./deploy/conf/delayed_jobs.yml:/usr/src/app/config/delayed_jobs.yml:ro
+      - ./deploy/conf/domain.yml:/usr/src/app/config/domain.yml:ro
+      - ./deploy/conf/dynamic_settings.yml:/usr/src/app/config/dynamic_settings.yml:ro
+      - ./deploy/conf/outgoing_mail.yml:/usr/src/app/config/outgoing_mail.yml:ro
+      - ./deploy/conf/session_store.yml:/usr/src/app/config/session_store.yml:ro
+      - ./deploy/conf/redis.yml:/usr/src/app/config/redis.yml:ro
+      - ./deploy/conf/security.yml:/usr/src/app/config/security.yml:ro
+      #- ./deploy/conf/selenium.yml:/usr/src/app/config/selenium.yml:ro
+      #- ./deploy/conf/vault.yml:/usr/src/app/config/vault.yml:ro
+      # override config settings
+      - ./deploy/development-local.rb:/usr/src/app/config/environments/development-local.rb:ro
+      # persistence
+      - canvas_css_data:/usr/src/app/public/dist/brandable_css
+      - canvas_tmp_data:/usr/src/app/tmp
+      # wait for it script
+      - ./deploy/wait-for-it.sh:/usr/src/app/wait-for-it.sh:ro
+      # fixes/overrides
+      - ./override/fill_custom_claim_columns_for_resource_link.rb:/usr/src/app/lib/data_fixup/lti/fill_custom_claim_columns_for_resource_link.rb
+      - ./override/fill_lookup_uuid_and_resource_link_uuid_columns.rb:/usr/src/app/lib/data_fixup/lti/fill_lookup_uuid_and_resource_link_uuid_columns.rb
+      - ./override/20210201170030_fill_lookup_uuid_and_resource_link_uuid_columns_at_lti_resource_links.rb:/usr/src/app/db/migrate/20210201170030_fill_lookup_uuid_and_resource_link_uuid_columns_at_lti_resource_links.rb
+      # nginx and certificates CErtificates not included!!! shoudl be created
+      - ./deploy/nginx.conf:/usr/src/nginx/nginx.conf:ro
+      - ./certs/${HOST}.pem:/usr/src/nginx/certs/${HOST}.pem
+      - ./certs/${HOST}.key:/usr/src/nginx/certs/${HOST}.key
+      - ./certs/myCA.crt:/usr/local/share/ca-certificates/myCA.crt
+    expose:
+      - "80"
+      - "443"
+#    ports:
+#      - "80:80"
+#      - "443:443"
+    depends_on:
+      - canvas-db
+      - redis
+ #     - mail
+    networks:
+      - $NETWORK
+
+  worker:
+    image: instructure/canvas-lms:stable
+    command: bundle exec script/delayed_job run
+    secrets:
+      - SECRET
+      - API_KEY
+      - DB_DBA_PASSWORD
+    environment:
+      - CANVAS_DOMAIN=$HOST
+      - DB_DRIVER=postgresql
+      - DB_HOST=canvas-db
+      - DB_PORT=5432
+      - DB_USERNAME=canvas
+      - DB_PASSWORD=$DBA_PASSWORD
+      - DB_PASSWORD_FILE=/run/secrets/DB_DBA_PASSWORD
+      - DB_NAME=canvas
+      - MAIL_SERVER=$MAIL_SERVER
+      - MAIL_PORT=$MAIL_PORT
+      - MAIL_DOMAIN=$MAIL_DOMAIN
+      - MAIL_DEFAULT_SENDER_ADDRESS=$MAIL_DEFAULT_SENDER_ADDRESS
+      - MAIL_DEFAULT_SENDER_NAME=$MAIL_DEFAULT_SENDER_NAME
+      - RAILS_ENV=production
+      - REDIS_SERVER=redis://redis:6379
+      - PASSENGER_STARTUP_TIMEOUT=300
+    volumes:
+      # config
+      - ./deploy/conf/cache_store.yml:/usr/src/app/config/cache_store.yml:ro
+      - ./deploy/conf/cassandra.yml:/usr/src/app/config/cassandra.yml:ro
+      - ./deploy/conf/consul.yml:/usr/src/app/config/consul.yml:ro
+      - ./deploy/conf/database.yml:/usr/src/app/config/database.yml:ro
+      - ./deploy/conf/delayed_jobs.yml:/usr/src/app/config/delayed_jobs.yml:ro
+      - ./deploy/conf/domain.yml:/usr/src/app/config/domain.yml:ro
+      - ./deploy/conf/dynamic_settings.yml:/usr/src/app/config/dynamic_settings.yml:ro
+      - ./deploy/conf/outgoing_mail.yml:/usr/src/app/config/outgoing_mail.yml:ro
+      - ./deploy/conf/session_store.yml:/usr/src/app/config/session_store.yml:ro
+      - ./deploy/conf/redis.yml:/usr/src/app/config/redis.yml:ro
+      - ./deploy/conf/security.yml:/usr/src/app/config/security.yml:ro
+      #- ./deploy/conf/selenium.yml:/usr/src/app/config/selenium.yml:ro
+      #- ./deploy/conf/vault.yml:/usr/src/app/config/vault.yml:ro
+      # override config settings
+      - ./deploy/development-local.rb:/usr/src/app/config/environments/development-local.rb:ro
+      # persistence
+      - canvas_css_data:/usr/src/app/public/dist/brandable_css
+      - canvas_tmp_data:/usr/src/app/tmp
+      # wait for it script
+      - ./deploy/wait-for-it.sh:/usr/src/app/wait-for-it.sh:ro
+      # fixes/overrides
+      - ./override/fill_custom_claim_columns_for_resource_link.rb:/usr/src/app/lib/data_fixup/lti/fill_custom_claim_columns_for_resource_link.rb
+      - ./override/fill_lookup_uuid_and_resource_link_uuid_columns.rb:/usr/src/app/lib/data_fixup/lti/fill_lookup_uuid_and_resource_link_uuid_columns.rb
+      - ./override/20210201170030_fill_lookup_uuid_and_resource_link_uuid_columns_at_lti_resource_links.rb:/usr/src/app/db/migrate/20210201170030_fill_lookup_uuid_and_resource_link_uuid_columns_at_lti_resource_links.rb
+    depends_on:
+      - canvas-db
+      - redis
+#      - mail
+    networks:
+      - $NETWORK
+
+
+secrets:
+  DB_DBA_PASSWORD:
+    file: ./deploy/dba_password.txt  
+  SECRET:
+    file: ./deploy/secret.txt
+  API_KEY:
+    file: ./deploy/api_key.txt
+
+networks:
+  edubadges:
+    external: true
+
+volumes:
+  postgresdata:
+    external: true 
+  canvas_css_data:
+    external: true 
+  canvas_tmp_data:
+    external: true     
+  redisdata:
+    external: true  
